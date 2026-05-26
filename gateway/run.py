@@ -7743,7 +7743,7 @@ class GatewayRunner:
                     # Normalize to hyphenated form before checking known
                     # built-ins (command may be an alias target set by the
                     # quick-command block above, so _cmd_def can be stale).
-                    if command.replace("_", "-") not in GATEWAY_KNOWN_COMMANDS:
+                    if not is_gateway_known_command(command.replace("_", "-")):
                         logger.warning(
                             "Unrecognized slash command /%s from %s — "
                             "replying with unknown-command notice",

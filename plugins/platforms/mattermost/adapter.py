@@ -99,6 +99,254 @@ class MattermostAdapter(BasePlatformAdapter):
         # Dedup cache (prevent reprocessing)
         self._dedup = MessageDeduplicator()
 
+        # Slash command web server state
+        self._slash_site: Any = None
+        self._slash_runner: Any = None
+
+    # ------------------------------------------------------------------
+    # Slash command definitions
+    # ------------------------------------------------------------------
+
+    _MATTERMOST_COMMAND_DEFS: Dict[str, Tuple[str, str]] = {
+        "new": ("Start a new conversation", ""),
+        "status": ("Show Hermes session info", ""),
+        "sethome": ("Set this chat as the home channel", ""),
+        "model": ("Show or change the model", "name"),
+        "stop": ("Stop running background processes", ""),
+        "compress": ("Compress conversation context", ""),
+        "resume": ("Resume a previously-named session", "name"),
+        "approve": ("Approve a pending command", "scope"),
+        "deny": ("Deny a pending command", ""),
+        "reasoning": ("Manage reasoning effort", "effort"),
+        "voice": ("Toggle voice reply mode", "mode"),
+        "restart": ("Restart the Hermes gateway", ""),
+        "update": ("Update Hermes to latest", ""),
+        "config": ("Show Hermes configuration", ""),
+        "skills": ("Manage skills", "action"),
+        "insights": ("Usage analytics", "days"),
+        "usage": ("Show token usage", ""),
+        "yolo": ("Toggle YOLO mode", ""),
+        "platforms": ("Show platform connection status", ""),
+        "steer": ("Inject a message mid-turn", "prompt"),
+        "reload-mcp": ("Reload MCP servers", ""),
+        "goal": ("Set a standing goal", "goal"),
+    }
+
+    def _get_slash_commands_port(self) -> int:
+        """Return the port used for the Mattermost slash command callback server."""
+        return int(os.getenv("MATTERMOST_SLASH_PORT", "18080"))
+
+    def _get_slash_callback_url(self, port: int) -> str:
+        """Return the callback URL registered with Mattermost for slash commands.
+
+        Override via MATTERMOST_SLASH_CALLBACK_URL env var.  Defaults to the
+        host's LAN IP so docker-hosted Mattermost can reach it.
+        """
+        override = os.getenv("MATTERMOST_SLASH_CALLBACK_URL", "").rstrip("/")
+        if override:
+            return f"{override}/mattermost-slash"
+        host = os.getenv("MATTERMOST_SLASH_HOST", "")
+        if not host:
+            # Auto-detect: try to find a non-loopback IP
+            import socket
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                s.connect(("8.8.8.8", 80))
+                host = s.getsockname()[0]
+                s.close()
+            except Exception:
+                host = "127.0.0.1"
+        return f"http://{host}:{port}/mattermost-slash"
+
+    async def _ensure_teams(self) -> List[str]:
+        """Fetch team IDs the bot can register commands on."""
+        teams = await self._api_get("teams")
+        if not teams:
+            teams = []
+        return [t["id"] for t in teams if "id" in t]
+
+    async def _register_slash_commands(self) -> None:
+        """Register Hermes gateway commands with the Mattermost API."""
+        teams = await self._ensure_teams()
+        if not teams:
+            logger.warning("Mattermost: no teams found — can't register slash commands")
+            return
+
+        port = self._get_slash_commands_port()
+        callback_url = self._get_slash_callback_url(port)
+
+        # Build per-team existing command map: team_id -> {trigger: id}
+        existing_by_team: Dict[str, Dict[str, str]] = {}
+        for team_id in teams:
+            existing_by_team[team_id] = {}
+            cmds = await self._api_get(f"commands?team_id={team_id}")
+            if cmds:
+                for c in cmds:
+                    cid = c.get("id", "").strip()
+                    trigger = c.get("trigger", "").strip()
+                    if cid and trigger:
+                        existing_by_team[team_id][trigger] = cid
+
+        for trigger, (desc, hint) in self._MATTERMOST_COMMAND_DEFS.items():
+            for team_id in teams:
+                team_existing = existing_by_team.get(team_id, {})
+                if trigger in team_existing:
+                    cid = team_existing[trigger]
+                    # Already registered on this team — update URL in case IP changed.
+                    await self._api_put(
+                        f"commands/{cid}",
+                        {
+                            "id": cid,
+                            "team_id": team_id,
+                            "trigger": trigger,
+                            "url": callback_url,
+                            "method": "P",
+                            "auto_complete": True,
+                            "auto_complete_desc": desc[:128],
+                            "auto_complete_hint": hint[:64],
+                            "display_name": f"Hermes {trigger}",
+                            "description": desc[:128],
+                        },
+                    )
+                else:
+                    # Register new command on this team.
+                    await self._api_post("commands", {
+                        "team_id": team_id,
+                        "trigger": trigger,
+                        "url": callback_url,
+                        "method": "P",
+                        "display_name": f"Hermes {trigger}",
+                        "description": desc[:128],
+                        "auto_complete": True,
+                        "auto_complete_desc": desc[:128],
+                        "auto_complete_hint": hint[:64],
+                    })
+
+        logger.info(
+            "Mattermost: registered %d slash command(s) across %d team(s) → %s",
+            len(self._MATTERMOST_COMMAND_DEFS), len(teams), callback_url,
+        )
+
+    async def _start_slash_web_server(self) -> None:
+        """Start a lightweight aiohttp web server for slash command callbacks.
+
+        Mattermost POSTs here when a user runs a registered /command.
+        We convert the POST into a MessageEvent and feed it to the agent.
+        """
+        import aiohttp
+        from aiohttp import web
+
+        port = self._get_slash_commands_port()
+        app = web.Application()
+
+        async def handle_command(request: web.Request) -> web.Response:
+            """Handle an incoming Mattermost slash command POST."""
+            logger.info("Mattermost: received slash command callback")
+            try:
+                data = await request.post()
+            except Exception as exc:
+                logger.warning("Mattermost: failed to parse slash command POST: %s", exc)
+                return web.Response(text="", status=400)
+
+            trigger = str(data.get("command", "")).lstrip("/")
+            text = str(data.get("text", "")).strip()
+            channel_id = str(data.get("channel_id", ""))
+            user_id = str(data.get("user_id", ""))
+            user_name = str(data.get("user_name", ""))
+            team_id = str(data.get("team_id", ""))
+
+            logger.info("Mattermost: slash command /%s from @%s in %s", trigger, user_name, channel_id)
+
+            if not trigger:
+                logger.warning("Mattermost: slash command missing trigger")
+                return web.Response(text="", status=400)
+
+            # Reconstruct the slash command as a message text.
+            cmd_text = f"/{trigger}"
+            if text:
+                cmd_text += f" {text}"
+
+            # Determine channel type so DMs are handled correctly (session key
+            # includes chat_type, and /new must reset the right session).
+            channel_type = "channel"
+            if channel_id and self._session:
+                try:
+                    ch_info = await self._api_get(f"channels/{channel_id}")
+                    if ch_info:
+                        raw_type = ch_info.get("type", "O")
+                        channel_type = _CHANNEL_TYPE_MAP.get(raw_type, "channel")
+                except Exception:
+                    pass
+
+            # Build a minimal MessageEvent and feed it to the agent.
+            source = self.build_source(
+                chat_id=channel_id,
+                chat_type=channel_type,
+                user_id=user_id,
+                user_name=user_name,
+                thread_id=None,
+            )
+
+            msg_event = MessageEvent(
+                text=cmd_text,
+                message_type=MessageType.COMMAND,
+                source=source,
+                raw_message={"from_slash": True},
+                message_id=f"slash-{trigger}-{channel_id}",
+                media_urls=[],
+                media_types=[],
+                channel_prompt=None,
+            )
+
+            # Fire and forget — return immediately so Mattermost doesn't timeout.
+            asyncio.create_task(self.handle_message(msg_event))
+            return web.Response(
+                text=json.dumps({
+                    "response_type": "ephemeral",
+                    "text": f"Running /{trigger}...",
+                }),
+                content_type="application/json",
+            )
+
+        app.router.add_post("/mattermost-slash", handle_command)
+
+        async def _health_handler(request: web.Request) -> web.Response:
+            return web.Response(text="ok")
+
+        app.router.add_get("/health", _health_handler)
+
+        runner = web.AppRunner(app)
+        await runner.setup()
+        try:
+            self._slash_site = web.TCPSite(runner, "0.0.0.0", port)
+            await self._slash_site.start()
+            self._slash_runner = runner
+            logger.info("Mattermost: slash command web server started on port %d", port)
+        except OSError as exc:
+            logger.warning(
+                "Mattermost: could not bind port %d for slash commands: %s "
+                "(autocomplete will not work; try a different port)",
+                port, exc,
+            )
+            await runner.cleanup()
+            self._slash_runner = None
+            self._slash_site = None
+
+    async def _stop_slash_web_server(self) -> None:
+        """Stop the slash command callback web server."""
+        if self._slash_site:
+            try:
+                await self._slash_site.stop()
+            except Exception:
+                pass
+            self._slash_site = None
+        if self._slash_runner:
+            try:
+                await self._slash_runner.cleanup()
+            except Exception:
+                pass
+            self._slash_runner = None
+
     # ------------------------------------------------------------------
     # HTTP helpers
     # ------------------------------------------------------------------
@@ -224,6 +472,10 @@ class MattermostAdapter(BasePlatformAdapter):
         # Start WebSocket in background.
         self._ws_task = asyncio.create_task(self._ws_loop())
         self._mark_connected()
+
+        # Start slash command callback server and register commands with Mattermost.
+        await self._start_slash_web_server()
+        asyncio.create_task(self._register_slash_commands())
         return True
 
     async def disconnect(self) -> None:
@@ -246,6 +498,8 @@ class MattermostAdapter(BasePlatformAdapter):
 
         if self._session and not self._session.closed:
             await self._session.close()
+
+        await self._stop_slash_web_server()
 
         logger.info("Mattermost: disconnected")
 
