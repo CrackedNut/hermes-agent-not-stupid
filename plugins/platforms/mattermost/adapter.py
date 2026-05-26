@@ -137,12 +137,19 @@ class MattermostAdapter(BasePlatformAdapter):
         "goal": ("Set a standing goal", "goal"),
         "background": ("Run a prompt in a background session", "prompt"),
         "queue": ("Queue a prompt for next turn", "prompt"),
+        "q": ("Alias for /queue", "prompt"),
         "footer": ("Toggle runtime-metadata footer", "on|off|status"),
         "curator": ("Background skill maintenance", "status|run|pin|archive"),
         "kanban": ("Drive the kanban board", "action"),
         "commands": ("Browse all commands and skills", "page"),
         "debug": ("Upload debug report", ""),
         "help": ("Show messaging help", ""),
+    }
+
+    # Alias mapping: trigger -> canonical command name
+    _COMMAND_ALIASES = {
+        "q": "queue",
+        "skill": "skills",
     }
 
     def _get_slash_commands_port(self) -> int:
@@ -273,6 +280,12 @@ class MattermostAdapter(BasePlatformAdapter):
             if not trigger:
                 logger.warning("Mattermost: slash command missing trigger")
                 return web.Response(text="", status=400)
+
+            # Resolve aliases to canonical command names
+            canonical = self._COMMAND_ALIASES.get(trigger, trigger)
+            if canonical != trigger:
+                logger.debug("Mattermost: resolved alias /%s -> /%s", trigger, canonical)
+                trigger = canonical
 
             # Reconstruct the slash command as a message text.
             cmd_text = f"/{trigger}"
