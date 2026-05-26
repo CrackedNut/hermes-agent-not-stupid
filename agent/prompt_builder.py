@@ -1297,6 +1297,35 @@ def _truncate_content(content: str, filename: str, max_chars: int = CONTEXT_FILE
     return head + marker + tail
 
 
+def load_directives_md() -> Optional[str]:
+    """Load DIRECTIVES.md from HERMES_HOME and return its content, or None.
+
+    Used as immutable user directives (slot #0 in the system prompt).
+    This file is read-only — the agent must NEVER modify it.
+    It defines core behavioral loops, guardrails, and reference data
+    that must survive context compaction and session restarts.
+    """
+    try:
+        from hermes_cli.config import ensure_hermes_home
+        ensure_hermes_home()
+    except Exception as e:
+        logger.debug("Could not ensure HERMES_HOME before loading DIRECTIVES.md: %s", e)
+
+    directives_path = get_hermes_home() / "DIRECTIVES.md"
+    if not directives_path.exists():
+        return None
+    try:
+        content = directives_path.read_text(encoding="utf-8").strip()
+        if not content:
+            return None
+        content = _scan_context_content(content, "DIRECTIVES.md")
+        content = _truncate_content(content, "DIRECTIVES.md")
+        return content
+    except Exception as e:
+        logger.debug("Could not read DIRECTIVES.md from %s: %s", directives_path, e)
+        return None
+
+
 def load_soul_md() -> Optional[str]:
     """Load SOUL.md from HERMES_HOME and return its content, or None.
 

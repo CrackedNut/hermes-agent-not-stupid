@@ -83,6 +83,12 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     # ── Stable tier ────────────────────────────────────────────────
     stable_parts: List[str] = []
 
+    # Load immutable user directives first — these are read-only behavioral
+    # guardrails that survive context compaction and session restarts.
+    _directives_content = _r.load_directives_md()
+    if _directives_content:
+        stable_parts.append(_directives_content)
+
     # Try SOUL.md as primary identity unless the caller explicitly skipped it.
     # Some execution modes (cron) still want HERMES_HOME persona while keeping
     # cwd project instructions disabled.
