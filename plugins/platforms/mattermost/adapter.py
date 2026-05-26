@@ -109,12 +109,17 @@ class MattermostAdapter(BasePlatformAdapter):
 
     _MATTERMOST_COMMAND_DEFS: Dict[str, Tuple[str, str]] = {
         "new": ("Start a new conversation", ""),
+        "reset": ("Reset conversation history", ""),
         "status": ("Show Hermes session info", ""),
         "sethome": ("Set this chat as the home channel", ""),
         "model": ("Show or change the model", "name"),
         "stop": ("Stop running background processes", ""),
         "compress": ("Compress conversation context", ""),
         "resume": ("Resume a previously-named session", "name"),
+        "retry": ("Retry the last message", ""),
+        "undo": ("Remove the last exchange", ""),
+        "topic": ("Manage multi-session topic mode", "off|help|session-id"),
+        "title": ("Set or show the session title", "name"),
         "approve": ("Approve a pending command", "scope"),
         "deny": ("Deny a pending command", ""),
         "reasoning": ("Manage reasoning effort", "effort"),
@@ -130,6 +135,14 @@ class MattermostAdapter(BasePlatformAdapter):
         "steer": ("Inject a message mid-turn", "prompt"),
         "reload-mcp": ("Reload MCP servers", ""),
         "goal": ("Set a standing goal", "goal"),
+        "background": ("Run a prompt in a background session", "prompt"),
+        "queue": ("Queue a prompt for next turn", "prompt"),
+        "footer": ("Toggle runtime-metadata footer", "on|off|status"),
+        "curator": ("Background skill maintenance", "status|run|pin|archive"),
+        "kanban": ("Drive the kanban board", "action"),
+        "commands": ("Browse all commands and skills", "page"),
+        "debug": ("Upload debug report", ""),
+        "help": ("Show messaging help", ""),
     }
 
     def _get_slash_commands_port(self) -> int:
