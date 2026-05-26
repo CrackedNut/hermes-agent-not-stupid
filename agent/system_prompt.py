@@ -103,6 +103,12 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
         # Fallback to hardcoded identity
         stable_parts.append(DEFAULT_AGENT_IDENTITY)
 
+    # Project index — auto-built from ~/agent-memory/projects/ description.md files.
+    # Injected early so the agent knows what projects are active before skills/tools.
+    _projects_index = _r.load_projects_index()
+    if _projects_index:
+        stable_parts.append(_projects_index)
+
     # Pointer to the hermes-agent skill + docs for user questions about Hermes itself.
     stable_parts.append(HERMES_AGENT_HELP_GUIDANCE)
 

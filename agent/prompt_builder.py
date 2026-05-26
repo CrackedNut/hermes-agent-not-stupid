@@ -1354,6 +1354,47 @@ def load_soul_md() -> Optional[str]:
         return None
 
 
+def load_projects_index() -> Optional[str]:
+    """Build a project index from ~/agent-memory/projects/ and return as markdown.
+
+    Scans the projects directory, reads description.md from each project folder,
+    and builds a lightweight index for the stable tier of the system prompt.
+    Skips .archive/ and anything without a description.md.
+    """
+    try:
+        projects_dir = Path.home() / "agent-memory" / "projects"
+        if not projects_dir.exists():
+            return None
+
+        active_projects = []
+        for item in sorted(projects_dir.iterdir()):
+            if item.name.startswith(".") or item.name == "README.md":
+                continue
+            if not item.is_dir() or item.name == ".archive":
+                continue
+
+            description_md = item / "description.md"
+            if description_md.exists():
+                desc = description_md.read_text(encoding="utf-8").strip()
+                if desc:
+                    active_projects.append((item.name, desc))
+
+        if not active_projects:
+            return None
+
+        lines = ["## Active Projects", ""]
+        for name, desc in active_projects:
+            # Truncate long descriptions
+            if len(desc) > 120:
+                desc = desc[:117] + "..."
+            lines.append(f"- **{name}** — {desc}")
+
+        return "\n".join(lines)
+    except Exception as e:
+        logger.debug("Could not build projects index: %s", e)
+        return None
+
+
 def _load_hermes_md(cwd_path: Path) -> str:
     """.hermes.md / HERMES.md — walk to git root."""
     hermes_md_path = _find_hermes_md(cwd_path)
